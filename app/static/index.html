@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Очистка голоса</title>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  </head>
+  <body>
+    <main class="mx-auto max-w-xl p-4 sm:p-8">
+      <article class="card card-border">
+        <div class="card-body">
+          <h1 class="card-title">Очистка голоса</h1>
+          <p>
+            Загрузите запись в формате m4a. На выходе будет mp3 той же длины: останется голос,
+            вздохи станут тише, кашель, щелчки и удары уйдут в тишину.
+          </p>
+          <form id="form">
+            <fieldset class="fieldset">
+              <legend class="fieldset-legend">Запись</legend>
+              <input
+                id="file"
+                class="file-input w-full"
+                type="file"
+                accept=".m4a,audio/mp4,audio/x-m4a"
+                required
+              />
+              <p class="label">Файл до 1 ГБ. Обработка идёт на этом компьютере.</p>
+            </fieldset>
+            <button id="submit" class="btn btn-primary" type="submit">Обработать</button>
+          </form>
+          <p id="status" class="min-h-6" aria-live="polite"></p>
+          <progress id="bar" class="progress w-full" value="0" max="100" hidden></progress>
+          <div id="error" role="alert" class="alert alert-error" hidden></div>
+          <audio id="player" class="w-full" controls hidden></audio>
+          <a id="download" class="btn" href="#" download="voice.mp3" hidden>Скачать mp3</a>
+        </div>
+      </article>
+    </main>
+    <script>
+      const form = document.querySelector("#form");
+      const fileInput = document.querySelector("#file");
+      const submit = document.querySelector("#submit");
+      const status = document.querySelector("#status");
+      const bar = document.querySelector("#bar");
+      const errorBox = document.querySelector("#error");
+      const player = document.querySelector("#player");
+      const download = document.querySelector("#download");
+
+      function showError(message) {
+        errorBox.hidden = false;
+        errorBox.textContent = message;
+      }
+
+      function clearResult() {
+        errorBox.hidden = true;
+        errorBox.textContent = "";
+        player.hidden = true;
+        player.removeAttribute("src");
+        download.hidden = true;
+      }
+
+      async function watch(id) {
+        const response = await fetch("/jobs/" + id);
+        if (!response.ok) {
+          showError("Не удалось узнать статус обработки");
+          submit.disabled = false;
+          return;
+        }
+        const job = await response.json();
+        status.textContent = job.stage || "";
+        bar.hidden = false;
+        bar.value = job.percent || 0;
+        if (job.status === "done") {
+          const url = "/jobs/" + id + "/file";
+          player.src = url;
+          player.hidden = false;
+          download.href = url;
+          download.hidden = false;
+          submit.disabled = false;
+          return;
+        }
+        if (job.status === "error") {
+          showError(job.error || "Обработка прервалась");
+          submit.disabled = false;
+          return;
+        }
+        window.setTimeout(function () {
+          watch(id);
+        }, 1000);
+      }
+
+      form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        clearResult();
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) {
+          showError("Выберите файл m4a");
+          return;
+        }
+        submit.disabled = true;
+        status.textContent = "Загрузка";
+        bar.hidden = false;
+        bar.value = 0;
+        const body = new FormData();
+        body.append("file", file);
+        const response = await fetch("/jobs", { method: "POST", body: body });
+        if (!response.ok) {
+          let message = "Не удалось принять файл";
+          try {
+            const payload = await response.json();
+            if (payload.detail) message = payload.detail;
+          } catch (ignore) {}
+          showError(message);
+          submit.disabled = false;
+          return;
+        }
+        const payload = await response.json();
+        location.hash = payload.id;
+        watch(payload.id);
+      });
+
+      if (location.hash.length > 1) {
+        submit.disabled = true;
+        watch(location.hash.slice(1));
+      }
+    </script>
+  </body>
+</html>
