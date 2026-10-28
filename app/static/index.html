@@ -37,6 +37,34 @@
           <a id="download" class="btn" href="#" download="voice.mp3" hidden>Скачать mp3</a>
         </div>
       </article>
+      <article class="card card-border mt-6">
+        <div class="card-body">
+          <h2 class="card-title">Видео для Telegram</h2>
+          <p>
+            Загрузите ролик целиком. Голос очистится так же, как в записи, а видео сожмётся
+            до 48 МБ, чтобы его было удобно отправить в Telegram.
+          </p>
+          <form id="video-form">
+            <fieldset class="fieldset">
+              <legend class="fieldset-legend">Видео</legend>
+              <input
+                id="video-file"
+                class="file-input w-full"
+                type="file"
+                accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/webm,video/x-matroska"
+                required
+              />
+              <p class="label">Файл до 4 ГБ. На выходе mp4 той же длины.</p>
+            </fieldset>
+            <button id="video-submit" class="btn" type="submit">Собрать видео</button>
+          </form>
+          <p id="video-status" class="min-h-6" aria-live="polite"></p>
+          <progress id="video-bar" class="progress w-full" value="0" max="100" hidden></progress>
+          <div id="video-error" role="alert" class="alert alert-error" hidden></div>
+          <video id="video-player" class="w-full" controls hidden></video>
+          <a id="video-download" class="btn" href="#" download="voice.mp4" hidden>Скачать mp4</a>
+        </div>
+      </article>
     </main>
     <script>
       const form = document.querySelector("#form");
@@ -47,43 +75,70 @@
       const errorBox = document.querySelector("#error");
       const player = document.querySelector("#player");
       const download = document.querySelector("#download");
+      const videoForm = document.querySelector("#video-form");
+      const videoInput = document.querySelector("#video-file");
+      const videoSubmit = document.querySelector("#video-submit");
+      const videoStatus = document.querySelector("#video-status");
+      const videoBar = document.querySelector("#video-bar");
+      const videoError = document.querySelector("#video-error");
+      const videoPlayer = document.querySelector("#video-player");
+      const videoDownload = document.querySelector("#video-download");
 
-      function showError(message) {
-        errorBox.hidden = false;
-        errorBox.textContent = message;
+      function lock(busy) {
+        submit.disabled = busy;
+        videoSubmit.disabled = busy;
       }
 
-      function clearResult() {
-        errorBox.hidden = true;
-        errorBox.textContent = "";
-        player.hidden = true;
-        player.removeAttribute("src");
-        download.hidden = true;
+      function panel(kind) {
+        if (kind === "video") {
+          return {
+            errorBox: videoError,
+            player: videoPlayer,
+            download: videoDownload,
+            status: videoStatus,
+            bar: videoBar,
+          };
+        }
+        return { errorBox: errorBox, player: player, download: download, status: status, bar: bar };
+      }
+
+      function showError(box, message) {
+        box.hidden = false;
+        box.textContent = message;
+      }
+
+      function clearResult(view) {
+        view.errorBox.hidden = true;
+        view.errorBox.textContent = "";
+        view.player.hidden = true;
+        view.player.removeAttribute("src");
+        view.download.hidden = true;
       }
 
       async function watch(id) {
         const response = await fetch("/jobs/" + id);
         if (!response.ok) {
-          showError("Не удалось узнать статус обработки");
-          submit.disabled = false;
+          showError(errorBox, "Не удалось узнать статус обработки");
+          lock(false);
           return;
         }
         const job = await response.json();
-        status.textContent = job.stage || "";
-        bar.hidden = false;
-        bar.value = job.percent || 0;
+        const view = panel(job.kind);
+        view.status.textContent = job.stage || "";
+        view.bar.hidden = false;
+        view.bar.value = job.percent || 0;
         if (job.status === "done") {
           const url = "/jobs/" + id + "/file";
-          player.src = url;
-          player.hidden = false;
-          download.href = url;
-          download.hidden = false;
-          submit.disabled = false;
+          view.player.src = url;
+          view.player.hidden = false;
+          view.download.href = url;
+          view.download.hidden = false;
+          lock(false);
           return;
         }
         if (job.status === "error") {
-          showError(job.error || "Обработка прервалась");
-          submit.disabled = false;
+          showError(view.errorBox, job.error || "Обработка прервалась");
+          lock(false);
           return;
         }
         window.setTimeout(function () {
@@ -91,38 +146,46 @@
         }, 1000);
       }
 
-      form.addEventListener("submit", async function (event) {
+      async function send(event, input, endpoint, emptyMessage, view) {
         event.preventDefault();
-        clearResult();
-        const file = fileInput.files && fileInput.files[0];
+        clearResult(panel("audio"));
+        clearResult(panel("video"));
+        const file = input.files && input.files[0];
         if (!file) {
-          showError("Выберите файл m4a");
+          showError(view.errorBox, emptyMessage);
           return;
         }
-        submit.disabled = true;
-        status.textContent = "Загрузка";
-        bar.hidden = false;
-        bar.value = 0;
+        lock(true);
+        view.status.textContent = "Загрузка";
+        view.bar.hidden = false;
+        view.bar.value = 0;
         const body = new FormData();
         body.append("file", file);
-        const response = await fetch("/jobs", { method: "POST", body: body });
+        const response = await fetch(endpoint, { method: "POST", body: body });
         if (!response.ok) {
           let message = "Не удалось принять файл";
           try {
             const payload = await response.json();
             if (payload.detail) message = payload.detail;
           } catch (ignore) {}
-          showError(message);
-          submit.disabled = false;
+          showError(view.errorBox, message);
+          lock(false);
           return;
         }
         const payload = await response.json();
         location.hash = payload.id;
         watch(payload.id);
+      }
+
+      form.addEventListener("submit", function (event) {
+        send(event, fileInput, "/jobs", "Выберите файл m4a", panel("audio"));
+      });
+      videoForm.addEventListener("submit", function (event) {
+        send(event, videoInput, "/jobs/video", "Выберите видео", panel("video"));
       });
 
       if (location.hash.length > 1) {
-        submit.disabled = true;
+        lock(true);
         watch(location.hash.slice(1));
       }
     </script>

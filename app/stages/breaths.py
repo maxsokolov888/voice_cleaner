@@ -8,7 +8,8 @@ import numpy as np
 import soundfile as sf
 
 MIN_GAP_S = 0.02
-RAMP_MS = 6
+FADE_OUT_MS = 180
+FADE_IN_MS = 90
 ONSET_MIN_S = 0.12
 ONSET_MAX_S = 1.0
 VOICE_AC = 0.42
@@ -29,7 +30,7 @@ def find_breaths(path: Path, sr: int, speech: list[tuple[int, int]]) -> tuple[li
         rms = float(np.sqrt(np.mean(mono**2))) if len(mono) else 0.0
         if rms > speech_rms * GAP_SPEECH_RATIO and (end - start) > int(0.35 * sr):
             continue
-        kept = _shrink_release(mono, sr, min_release_s=0.12)
+        kept = _shrink_release(mono, sr, min_release_s=0.04)
         if kept is None:
             continue
         rel_start, rel_end = kept
@@ -44,7 +45,7 @@ def find_breaths(path: Path, sr: int, speech: list[tuple[int, int]]) -> tuple[li
             rms = float(np.sqrt(np.mean(seg**2))) if len(seg) else 0.0
             breaths.append(_region(start + rel_start, start + rel_end, rms, sr))
         for rel_start, rel_end in _valleys(mono, sr, speech_rms):
-            kept = _shrink_release(mono[rel_start:rel_end], sr, min_release_s=0.10)
+            kept = _shrink_release(mono[rel_start:rel_end], sr, min_release_s=0.03)
             if kept is None:
                 continue
             seg_start, seg_end = kept
@@ -112,7 +113,7 @@ def _shrink_release(mono: np.ndarray, sr: int, min_release_s: float) -> tuple[in
         if acs[index] >= 0.38:
             last_voiced = index
     min_index = int(round(min_release_s * sr / frame))
-    hang = max(1, int(round(0.05 * sr / frame)))
+    hang = max(1, int(round(0.02 * sr / frame)))
     if last_voiced is None:
         start_index = min_index
     else:
@@ -137,7 +138,8 @@ def _region(start: int, end: int, rms: float, sr: int) -> dict:
         "start": int(start),
         "end": int(end),
         "gain": 0.0,
-        "ramp_ms": RAMP_MS,
+        "ramp_ms": FADE_OUT_MS,
+        "ramp_in_ms": FADE_IN_MS,
         "rms_before": float(rms),
         "label": "breath",
     }
@@ -219,7 +221,8 @@ def _merge(items: list[dict]) -> list[dict]:
             last["end"] = max(last["end"], item["end"])
             last["gain"] = min(last["gain"], item["gain"])
             last["rms_before"] = max(last["rms_before"], item["rms_before"])
-            last["ramp_ms"] = min(last["ramp_ms"], item["ramp_ms"])
+            last["ramp_ms"] = max(last["ramp_ms"], item["ramp_ms"])
+            last["ramp_in_ms"] = max(last.get("ramp_in_ms", 0), item.get("ramp_in_ms", 0))
         else:
             merged.append(dict(item))
     return merged

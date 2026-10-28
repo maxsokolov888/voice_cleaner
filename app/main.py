@@ -1,4 +1,4 @@
-"""Локальная страница: загрузка m4a и скачивание mp3."""
+"""Локальная страница: загрузка m4a или видео и скачивание результата."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ from fastapi.responses import FileResponse
 
 from app.paths import ROOT
 from app.pipeline import process
+from app.stages.video import EXTENSIONS, process_video
 
 JOBS = ROOT / "data" / "jobs"
-MAX_BYTES = 1024**3
+MAX_AUDIO_BYTES = 1024**3
+MAX_VIDEO_BYTES = 4 * 1024**3
 STATIC = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(title="Очистка голоса")
@@ -36,33 +38,39 @@ class Runner:
         with self._lock:
             self._busy = False
 
-    def launch(self, job_id: str, src: Path) -> None:
+    def launch(self, job_id: str, src: Path, kind: str) -> None:
         self.jobs[job_id] = {
             "id": job_id,
+            "kind": kind,
             "status": "running",
             "stage": "Очередь",
             "percent": 0,
             "error": "",
         }
-        thread = threading.Thread(target=self._run, args=(job_id, src), daemon=True)
+        (src.parent / "kind.txt").write_text(kind, encoding="utf-8")
+        thread = threading.Thread(target=self._run, args=(job_id, src, kind), daemon=True)
         thread.start()
 
-    def _run(self, job_id: str, src: Path) -> None:
+    def _run(self, job_id: str, src: Path, kind: str) -> None:
         job = self.jobs[job_id]
         work = src.parent
-        dst = work / "voice.mp3"
+        dst = work / ("voice.mp4" if kind == "video" else "voice.mp3")
 
         def progress(stage: str, percent: float) -> None:
             job["stage"] = stage
             job["percent"] = int(percent)
 
         try:
-            summary = process(src, dst, work, progress)
+            if kind == "video":
+                summary = process_video(src, dst, work, progress)
+            else:
+                summary = process(src, dst, work, progress)
             job["summary"] = {
                 "breaths": len(summary["breaths"]),
                 "events": len(summary["events"]),
                 "clicks": summary["clicks"],
                 "duration": summary["output_duration"],
+                "bytes": dst.stat().st_size,
             }
             job["status"] = "done"
             job["stage"] = "Готово"
@@ -77,6 +85,41 @@ class Runner:
 runner = Runner()
 
 
+def _kind(job_id: str, job: dict | None = None) -> str:
+    if job and job.get("kind"):
+        return str(job["kind"])
+    marker = JOBS / job_id / "kind.txt"
+    if marker.exists():
+        return marker.read_text(encoding="utf-8").strip() or "audio"
+    if (JOBS / job_id / "voice.mp4").exists():
+        return "video"
+    return "audio"
+
+
+def _result_path(job_id: str) -> Path | None:
+    folder = JOBS / job_id
+    if _kind(job_id) == "video":
+        video = folder / "voice.mp4"
+        return video if video.exists() else None
+    audio = folder / "voice.mp3"
+    return audio if audio.exists() else None
+
+
+async def _save_upload(file: UploadFile, target: Path, limit: int, too_big: str) -> None:
+    size = 0
+    with target.open("wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                raise HTTPException(status_code=413, detail=too_big)
+            out.write(chunk)
+    if size == 0:
+        raise HTTPException(status_code=400, detail="Файл пустой")
+
+
 @app.get("/")
 def index():
     return FileResponse(STATIC / "index.html")
@@ -84,51 +127,61 @@ def index():
 
 @app.post("/jobs")
 async def create_job(file: UploadFile = File(...)):
+    return await _create(file, "audio")
+
+
+@app.post("/jobs/video")
+async def create_video_job(file: UploadFile = File(...)):
+    return await _create(file, "video")
+
+
+async def _create(file: UploadFile, kind: str):
     filename = (file.filename or "").lower()
-    if not filename.endswith(".m4a"):
-        raise HTTPException(status_code=400, detail="Нужен файл в формате m4a")
+    if kind == "video":
+        suffix = Path(filename).suffix
+        if suffix not in EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Нужен видеофайл mp4, mov, mkv или webm")
+        limit = MAX_VIDEO_BYTES
+        too_big = "Файл больше 4 ГБ"
+        stored = "input" + suffix
+    else:
+        if not filename.endswith(".m4a"):
+            raise HTTPException(status_code=400, detail="Нужен файл в формате m4a")
+        limit = MAX_AUDIO_BYTES
+        too_big = "Файл больше 1 ГБ"
+        stored = "input.m4a"
     if not runner.reserve():
         raise HTTPException(status_code=409, detail="Уже идёт обработка другого файла")
     job_id = uuid.uuid4().hex
     folder = JOBS / job_id
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / "input.m4a"
-    size = 0
+    target = folder / stored
     try:
-        with target.open("wb") as out:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > MAX_BYTES:
-                    raise HTTPException(status_code=413, detail="Файл больше 1 ГБ")
-                out.write(chunk)
-        if size == 0:
-            raise HTTPException(status_code=400, detail="Файл пустой")
-        runner.launch(job_id, target)
+        await _save_upload(file, target, limit, too_big)
+        runner.launch(job_id, target, kind)
     except HTTPException:
         runner.release()
         raise
     except Exception:
         runner.release()
         raise
-    return {"id": job_id}
+    return {"id": job_id, "kind": kind}
 
 
 @app.get("/jobs/{job_id}")
 def job_status(job_id: str):
     job = runner.jobs.get(job_id)
+    kind = _kind(job_id, job)
     if job is None:
-        report = JOBS / job_id / "report.json"
-        mp3 = JOBS / job_id / "voice.mp3"
-        if mp3.exists():
-            return {"id": job_id, "status": "done", "stage": "Готово", "percent": 100, "error": ""}
-        if not report.exists() and not (JOBS / job_id).exists():
+        folder = JOBS / job_id
+        if _result_path(job_id) is not None:
+            return {"id": job_id, "kind": kind, "status": "done", "stage": "Готово", "percent": 100, "error": ""}
+        if not (folder / "report.json").exists() and not folder.exists():
             raise HTTPException(status_code=404, detail="Задача не найдена")
-        return {"id": job_id, "status": "running", "stage": "Обработка", "percent": 0, "error": ""}
+        return {"id": job_id, "kind": kind, "status": "running", "stage": "Обработка", "percent": 0, "error": ""}
     return {
         "id": job_id,
+        "kind": kind,
         "status": job["status"],
         "stage": job["stage"],
         "percent": job["percent"],
@@ -139,9 +192,16 @@ def job_status(job_id: str):
 
 @app.get("/jobs/{job_id}/file")
 def job_file(job_id: str):
-    path = JOBS / job_id / "voice.mp3"
-    if not path.exists():
+    path = _result_path(job_id)
+    if path is None:
         raise HTTPException(status_code=404, detail="Файл ещё не готов")
+    if path.suffix == ".mp4":
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            filename="voice.mp4",
+            content_disposition_type="inline",
+        )
     return FileResponse(
         path,
         media_type="audio/mpeg",

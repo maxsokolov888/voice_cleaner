@@ -8,6 +8,7 @@ import soundfile as sf
 from app.stages.breaths import find_breaths
 from app.stages.declick import declick_block
 from app.stages.gain import apply_gains
+from app.stages.video import TARGET_BYTES, frame_size, video_bitrate
 
 
 def test_click_removed_and_length_kept() -> None:
@@ -52,9 +53,11 @@ def test_breath_ducked_not_cut() -> None:
     data, _ = sf.read(path, dtype="float32")
     assert len(data) == len(audio)
     span = after["end"] - after["start"]
-    piece = data[after["start"] + span // 5 : after["end"] - span // 5]
+    piece = data[after["start"] + span // 3 : after["end"] - span // 3]
     level = float(np.sqrt(np.mean(piece**2)))
     assert level < max(1e-4, before * 0.02)
+    edge = data[after["start"] : after["start"] + int(0.02 * sr)]
+    assert float(np.sqrt(np.mean(edge**2))) > level * 5
     assert np.max(np.abs(data[: len(speech)] - speech)) < 1e-5
     assert np.max(np.abs(data[-len(speech) :] - speech)) < 1e-5
 
@@ -72,7 +75,7 @@ def test_glued_inhale_removed_and_vowel_kept() -> None:
     apply_gains(path, sr, breaths)
     data, _ = sf.read(path, dtype="float32")
     assert len(data) == len(audio)
-    muted = data[int(0.05 * sr) : len(inhale) // 2]
+    muted = data[int(0.19 * sr) : int(0.26 * sr)]
     assert float(np.sqrt(np.mean(muted**2))) < 1e-3
     kept = data[len(inhale) + int(0.2 * sr) : len(inhale) + int(0.6 * sr)]
     assert np.allclose(kept, tone[int(0.2 * sr) : int(0.6 * sr)], atol=1e-5)
@@ -90,7 +93,7 @@ def test_internal_inhale_between_words() -> None:
     apply_gains(path, sr, breaths)
     data, _ = sf.read(path, dtype="float32")
     assert len(data) == len(audio)
-    mid = data[len(tone) + int(0.18 * sr) : len(tone) + len(inhale) - int(0.08 * sr)]
+    mid = data[len(tone) + int(0.22 * sr) : len(tone) + len(inhale) - int(0.12 * sr)]
     assert float(np.sqrt(np.mean(mid**2))) < 1e-3
     assert np.allclose(data[int(0.2 * sr) : int(0.6 * sr)], tone[int(0.2 * sr) : int(0.6 * sr)], atol=1e-4)
 
@@ -109,8 +112,23 @@ def test_voiced_ending_kept() -> None:
     assert len(data) == len(audio)
     ending = data[len(tone) : len(tone) + len(decay)]
     assert np.allclose(ending, decay, atol=1e-3)
-    muted = data[len(tone) + len(decay) + int(0.16 * sr) : len(audio) - int(0.05 * sr)]
+    muted = data[len(tone) + len(decay) + int(0.24 * sr) : len(audio) - int(0.12 * sr)]
     assert float(np.sqrt(np.mean(muted**2))) < 1e-3
+
+
+def test_telegram_frame_budget() -> None:
+    short = frame_size(1920, 1080, 120)
+    assert short == (1920, 1080)
+    assert video_bitrate(120) >= 1_200_000
+    medium = frame_size(1920, 1080, 400)
+    assert medium[1] == 720
+    long = frame_size(1920, 1080, 1200)
+    assert long[1] == 480
+    assert long[0] % 2 == 0
+    portrait = frame_size(1080, 1920, 1200)
+    assert portrait[1] == 480
+    assert portrait[0] % 2 == 0
+    assert TARGET_BYTES == 48 * 1024 * 1024
 
 
 def main() -> None:
@@ -120,6 +138,7 @@ def main() -> None:
     test_glued_inhale_removed_and_vowel_kept()
     test_internal_inhale_between_words()
     test_voiced_ending_kept()
+    test_telegram_frame_budget()
     print("selftest ok")
 
 

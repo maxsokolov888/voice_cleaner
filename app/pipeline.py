@@ -81,7 +81,9 @@ def process(src: Path, dst: Path, workdir: Path, progress=None) -> dict:
 
 def _measure_after(path: Path, breaths: list[dict], events: list[dict], speech: list[tuple[int, int]]) -> None:
     for item in breaths:
-        pad = int(item["ramp_ms"] / 1000 * 48_000)
+        pad = int(max(item["ramp_ms"], item.get("ramp_in_ms", item["ramp_ms"])) / 1000 * 48_000)
+        length = item["end"] - item["start"]
+        pad = min(pad, max(0, (length - 1) // 3))
         start = item["start"] + pad
         end = max(start + 1, item["end"] - pad)
         item["rms_after"] = region_rms(path, start, end)

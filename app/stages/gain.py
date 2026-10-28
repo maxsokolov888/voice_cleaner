@@ -27,7 +27,13 @@ def apply_gains(path: Path, sr: int, regions: list[dict]) -> None:
                 b = min(end, region_end)
                 if b <= a:
                     continue
-                full = _envelope(region_end - region_start, sr, float(region["gain"]), int(region["ramp_ms"]))
+                full = _envelope(
+                    region_end - region_start,
+                    sr,
+                    float(region["gain"]),
+                    int(region["ramp_ms"]),
+                    int(region.get("ramp_in_ms", region["ramp_ms"])),
+                )
                 env[a - start : b - start] *= full[a - region_start : b - region_start]
             audio.seek(start)
             audio.write(block * env[:, None])
@@ -35,14 +41,20 @@ def apply_gains(path: Path, sr: int, regions: list[dict]) -> None:
             raise RuntimeError("Заглушение изменило длину файла")
 
 
-def _envelope(length: int, sr: int, gain: float, ramp_ms: int) -> np.ndarray:
-    ramp = min(int(sr * ramp_ms / 1000), length // 2)
+def _envelope(length: int, sr: int, gain: float, ramp_ms: int, ramp_in_ms: int | None = None) -> np.ndarray:
+    fade_out = int(sr * ramp_ms / 1000)
+    fade_in = int(sr * (ramp_ms if ramp_in_ms is None else ramp_in_ms) / 1000)
+    if fade_out + fade_in > length and fade_out + fade_in > 0:
+        scale = length / (fade_out + fade_in)
+        fade_out = int(fade_out * scale)
+        fade_in = int(fade_in * scale)
     env = np.full(length, gain, dtype=np.float32)
-    if ramp <= 1:
-        return env
-    curve = (1.0 - np.cos(np.linspace(0.0, np.pi, ramp, dtype=np.float32))) / 2.0
-    env[:ramp] = 1.0 + (gain - 1.0) * curve
-    env[-ramp:] = 1.0 + (gain - 1.0) * curve[::-1]
+    if fade_out > 1:
+        curve = (1.0 - np.cos(np.linspace(0.0, np.pi, fade_out, dtype=np.float32))) / 2.0
+        env[:fade_out] = 1.0 + (gain - 1.0) * curve
+    if fade_in > 1:
+        curve = (1.0 - np.cos(np.linspace(0.0, np.pi, fade_in, dtype=np.float32))) / 2.0
+        env[-fade_in:] = 1.0 + (gain - 1.0) * curve[::-1]
     return env
 
 
